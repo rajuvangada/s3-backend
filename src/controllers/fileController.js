@@ -62,6 +62,11 @@ const uploadFileController = async (req, res, next) => {
     const userId = req.user.id;
     const { folder_id } = req.body;
 
+    // Debug logging to verify Multer file handling
+    console.log('--- UploadFileController Debug ---');
+    console.log('req.file:', req.file);
+    console.log('req.body:', req.body);
+
     if (!req.file) {
       return next(new BadRequestError('No file uploaded.'));
     }
