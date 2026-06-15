@@ -78,7 +78,21 @@ const uploadFileController = async (req, res, next) => {
     const sanitizedName = file.originalname.replace(/\s+/g, '-');
     const s3Key = `users/${userId}/${category}/${objectId}-${sanitizedName}`;
 
-    await uploadFile(file.buffer, s3Key, file.mimetype);
+    // S3 upload debugging
+    console.log('Uploading to S3...');
+    console.log('Bucket:', process.env.AWS_S3_BUCKET_NAME);
+    console.log('Region:', process.env.AWS_REGION);
+    console.log('Filename:', file?.originalname);
+    console.log('Size:', file?.size);
+
+    let uploadResult;
+    try {
+      uploadResult = await uploadFile(file.buffer, s3Key, file.mimetype);
+      console.log('S3 Upload Success:', uploadResult);
+    } catch (s3Err) {
+      console.error('S3 Upload Error:', s3Err);
+      throw s3Err;
+    }
 
     const createdFile = await File.create({
       user_id: userId,

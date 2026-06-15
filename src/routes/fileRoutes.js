@@ -26,7 +26,17 @@ const {
 router.use(protect);
 
 // File management paths
-router.post('/upload', upload.single('file'), validate(uploadFileSchema), uploadFile);
+// Debug middleware to confirm route hit
+router.post(
+  '/upload',
+  (req, res, next) => {
+    console.log('Upload route hit');
+    next();
+  },
+  upload.single('file'),
+  validate(uploadFileSchema),
+  uploadFile
+);
 router.get('/', getFiles);
 router.get('/:id', getFile);
 router.put('/:id', validate(updateFileSchema), updateFile);

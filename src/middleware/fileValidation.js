@@ -34,4 +34,12 @@ const upload = multer({
   }
 });
 
+// Multer debug: log each file as it is processed
+upload._handleFile = ((originalHandleFile) => {
+  return function (req, file, cb) {
+    console.log('Multer received:', file.originalname);
+    return originalHandleFile.call(this, req, file, cb);
+  };
+})(upload._handleFile);
+
 module.exports = upload;

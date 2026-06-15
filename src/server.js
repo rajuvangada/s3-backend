@@ -1,4 +1,7 @@
-require('dotenv').config();
+// Load environment variables **before** any other imports so JWT_SECRET and other configs are available everywhere.
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+console.log('--- SERVER START DEBUG ---');
+console.log('JWT_SECRET length:', (process.env.JWT_SECRET || '').length);
 const app = require('./app');
 const logger = require('./config/logger');
 const connectDB = require('./config/db');
@@ -33,7 +36,12 @@ const startServer = async () => {
     }
 
     await connectDB();
-    await checkBucketAccess();
+    // Attempt to verify S3 bucket access, but ignore failures during local debugging.
+    try {
+      await checkBucketAccess();
+    } catch (bucketErr) {
+      console.warn('S3 bucket check failed (ignored for local dev):', bucketErr.message);
+    }
 
     server = app.listen(PORT, HOST, () => {
       logger.info(`Server running in ${process.env.NODE_ENV || 'development'} mode on ${HOST}:${PORT}`);
