@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const pool = require('../config/db');
+const User = require('../models/User');
 const { logActivity } = require('../services/activityService');
 const { BadRequestError, UnauthorizedError, ConflictError, NotFoundError } = require('../utils/errors');
 
@@ -23,8 +23,8 @@ const register = async (req, res, next) => {
     const { name, email, password } = req.body;
 
     // Check if email already exists
-    const [existing] = await pool.query('SELECT id FROM Users WHERE email = ?', [email]);
-    if (existing.length > 0) {
+    const existing = await User.findOne({ email });
+    if (existing) {
       return next(new ConflictError('An account with this email address already exists.'));
     }
 
@@ -32,13 +32,14 @@ const register = async (req, res, next) => {
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    // Insert user record into RDS
-    const [result] = await pool.query(
-      'INSERT INTO Users (name, email, password_hash) VALUES (?, ?, ?)',
-      [name, email, passwordHash]
-    );
+    // Insert user record into DB
+    const user = await User.create({
+      name,
+      email,
+      password_hash: passwordHash
+    });
 
-    const userId = result.insertId;
+    const userId = user.id;
     const token = generateToken(userId, email);
 
     // Log the user's initial login (auto-login upon successful registration)
@@ -69,12 +70,10 @@ const login = async (req, res, next) => {
     const { email, password } = req.body;
 
     // Fetch user details
-    const [users] = await pool.query('SELECT * FROM Users WHERE email = ?', [email]);
-    if (users.length === 0) {
+    const user = await User.findOne({ email });
+    if (!user) {
       return next(new UnauthorizedError('Invalid email or password.'));
     }
-
-    const user = users[0];
 
     // Compare passwords
     const isMatch = await bcrypt.compare(password, user.password_hash);
@@ -148,35 +147,31 @@ const updateProfile = async (req, res, next) => {
     const { name, profile_image } = req.body;
     const userId = req.user.id;
 
-    const fields = [];
-    const params = [];
+    const updateData = {};
 
     if (name !== undefined) {
-      fields.push('name = ?');
-      params.push(name);
+      updateData.name = name;
     }
 
     if (profile_image !== undefined) {
-      fields.push('profile_image = ?');
-      params.push(profile_image);
+      updateData.profile_image = profile_image;
     }
 
-    if (fields.length === 0) {
+    if (Object.keys(updateData).length === 0) {
       return next(new BadRequestError('No profile properties provided for modification.'));
     }
 
-    params.push(userId);
-
-    const query = `UPDATE Users SET ${fields.join(', ')} WHERE id = ?`;
-    await pool.query(query, params);
-
-    // Fetch updated user data
-    const [rows] = await pool.query('SELECT id, name, email, profile_image FROM Users WHERE id = ?', [userId]);
+    const updatedUser = await User.findByIdAndUpdate(userId, updateData, { new: true });
 
     res.status(200).json({
       status: 'success',
       data: {
-        user: rows[0]
+        user: {
+          id: updatedUser.id,
+          name: updatedUser.name,
+          email: updatedUser.email,
+          profile_image: updatedUser.profile_image
+        }
       }
     });
   } catch (error) {
@@ -193,12 +188,12 @@ const changePassword = async (req, res, next) => {
     const userId = req.user.id;
 
     // Fetch password hash from database
-    const [rows] = await pool.query('SELECT password_hash FROM Users WHERE id = ?', [userId]);
-    if (rows.length === 0) {
+    const user = await User.findById(userId);
+    if (!user) {
       return next(new NotFoundError('User record not found.'));
     }
 
-    const { password_hash: hash } = rows[0];
+    const hash = user.password_hash;
 
     // Verify existing password matches
     const isMatch = await bcrypt.compare(oldPassword, hash);
@@ -210,8 +205,9 @@ const changePassword = async (req, res, next) => {
     const salt = await bcrypt.genSalt(10);
     const newHash = await bcrypt.hash(newPassword, salt);
 
-    // Update in RDS
-    await pool.query('UPDATE Users SET password_hash = ? WHERE id = ?', [newHash, userId]);
+    // Update in DB
+    user.password_hash = newHash;
+    await user.save();
 
     res.status(200).json({
       status: 'success',

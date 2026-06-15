@@ -6,7 +6,7 @@ const logger = require('./config/logger');
 const errorHandler = require('./middleware/errorHandler');
 const { apiLimiter } = require('./middleware/rateLimiter');
 const { NotFoundError } = require('./utils/errors');
-const db = require('./config/db');
+const mongoose = require('mongoose');
 const s3Client = require('./config/s3Client');
 const { ListObjectsV2Command } = require('@aws-sdk/client-s3');
 
@@ -76,10 +76,8 @@ app.get('/api/health', async (req, res) => {
   let s3Status = 'DISCONNECTED';
 
   // Check Database status
-  if (db.isDbConnected) {
+  if (mongoose.connection.readyState === 1) {
     databaseStatus = 'CONNECTED';
-  } else if (db.useInMemory) {
-    databaseStatus = 'SIMULATED';
   }
 
   // Check S3 status

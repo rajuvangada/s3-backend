@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const pool = require('../config/db');
+const User = require('../models/User');
 const { UnauthorizedError } = require('../utils/errors');
 const logger = require('../config/logger');
 
@@ -27,13 +27,17 @@ const protect = async (req, res, next) => {
     }
 
     // Verify user still exists in the database
-    const [rows] = await pool.query('SELECT id, name, email FROM Users WHERE id = ?', [decoded.id]);
-    if (rows.length === 0) {
+    const user = await User.findById(decoded.id).select('name email');
+    if (!user) {
       return next(new UnauthorizedError('The user account associated with this token no longer exists.'));
     }
 
     // Attach user context to request
-    req.user = rows[0];
+    req.user = {
+      id: user.id,
+      name: user.name,
+      email: user.email
+    };
     next();
   } catch (error) {
     next(error);
