@@ -1,7 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { UnauthorizedError } = require('../utils/errors');
-const logger = require('../config/logger');
 
 /**
  * Middleware to protect routes and verify user identity via JWT.
@@ -21,7 +20,7 @@ const protect = async (req, res, next) => {
     // Decode and verify token
     let decoded;
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET || 'super_secret_dev_key_for_studentvault_2026');
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
     } catch (err) {
       return next(new UnauthorizedError('Invalid or expired authentication token. Please log in again.'));
     }

@@ -1,7 +1,9 @@
 const Joi = require('joi');
 
+const objectId = Joi.string().trim().length(24).hex();
+
 const uploadFileSchema = Joi.object({
-  folder_id: Joi.string().allow(null, '').optional() // Multer fields are strings
+  folder_id: objectId.allow(null, '').optional() // Multer fields are strings
 });
 
 const updateFileSchema = Joi.object({
@@ -12,21 +14,21 @@ const updateFileSchema = Joi.object({
 });
 
 const moveFileSchema = Joi.object({
-  file_id: Joi.string().uuid().required().messages({
+  file_id: objectId.required().messages({
     'string.empty': 'File ID is required.'
   }),
-  folder_id: Joi.number().integer().allow(null).required()
+  folder_id: objectId.allow(null, '').required()
 });
 
 const favoriteFileSchema = Joi.object({
-  file_id: Joi.string().uuid().required().messages({
+  file_id: objectId.required().messages({
     'string.empty': 'File ID is required.'
   }),
   is_favorite: Joi.boolean().required()
 });
 
 const createShareSchema = Joi.object({
-  file_id: Joi.string().uuid().required(),
+  file_id: objectId.required(),
   permission: Joi.string().valid('read').default('read'),
   expiry_hours: Joi.number().integer().min(1).max(720).default(24) // 1 hour to 30 days
 });

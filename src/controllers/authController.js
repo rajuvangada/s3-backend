@@ -10,7 +10,7 @@ const { BadRequestError, UnauthorizedError, ConflictError, NotFoundError } = req
 const generateToken = (userId, email) => {
   return jwt.sign(
     { id: userId, email },
-    process.env.JWT_SECRET || 'super_secret_dev_key_for_studentvault_2026',
+    process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
   );
 };

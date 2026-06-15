@@ -16,6 +16,7 @@ const { protect } = require('../middleware/authMiddleware');
 const upload = require('../middleware/fileValidation');
 const validate = require('../middleware/validate');
 const {
+  uploadFileSchema,
   updateFileSchema,
   moveFileSchema,
   favoriteFileSchema
@@ -25,7 +26,7 @@ const {
 router.use(protect);
 
 // File management paths
-router.post('/upload', upload.single('file'), uploadFile);
+router.post('/upload', upload.single('file'), validate(uploadFileSchema), uploadFile);
 router.get('/', getFiles);
 router.get('/:id', getFile);
 router.put('/:id', validate(updateFileSchema), updateFile);
