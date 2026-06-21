@@ -7,7 +7,8 @@ const fileSchema = new mongoose.Schema({
   original_name: { type: String, required: true },
   file_type: { type: String, required: true },
   file_size: { type: Number, required: true },
-  s3_key: { type: String, required: true }
+  s3_key: { type: String, required: true },
+  is_favorite: { type: Boolean, default: false }
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });

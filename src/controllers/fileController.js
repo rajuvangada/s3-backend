@@ -1,85 +1,115 @@
 const crypto = require('crypto');
-const pool = require('../config/db');
-const { uploadFile, deleteFile, getPreSignedDownloadUrl } = require('../services/s3Service');
+const File = require('../models/File');
+const Folder = require('../models/Folder');
+const SharedLink = require('../models/SharedLink');
+const { uploadFile, deleteFile: deleteS3File, getPreSignedDownloadUrl } = require('../services/s3Service');
 const { logActivity } = require('../services/activityService');
 const { BadRequestError, ForbiddenError, NotFoundError } = require('../utils/errors');
 
-// Helper to partition S3 file directories by standard portfolio category folders
+const serializeFile = (file) => ({
+  id: file.id,
+  user_id: file.user_id?.toString?.() || file.user_id,
+  folder_id: file.folder_id ? file.folder_id.toString() : null,
+  file_name: file.file_name,
+  original_name: file.original_name,
+  file_type: file.file_type,
+  file_size: file.file_size,
+  s3_key: file.s3_key,
+  is_favorite: file.is_favorite,
+  created_at: file.created_at,
+  updated_at: file.updated_at
+});
+
 const getS3Category = (mimetype) => {
-  if (mimetype === 'application/pdf') return 'resumes';
-  if (mimetype.startsWith('image/')) return 'certificates';
-  if (mimetype.startsWith('application/zip') || mimetype.startsWith('application/x-zip-compressed')) return 'projects';
-  return 'notes';
+  if (mimetype === 'application/pdf') return 'documents';
+  if (mimetype.startsWith('image/')) return 'images';
+  if (mimetype.includes('zip')) return 'archives';
+  return 'files';
 };
 
-/**
- * Handle multipart S3 file upload and DB metadata insertion.
- */
+const ensureOwnedFolder = async (folderId, userId) => {
+  if (!folderId || folderId === 'null' || folderId === '') {
+    return null;
+  }
+
+  const folder = await Folder.findById(folderId);
+  if (!folder) {
+    throw new NotFoundError('Folder not found.');
+  }
+
+  if (folder.user_id.toString() !== userId.toString()) {
+    throw new ForbiddenError('Access denied: you do not own this folder.');
+  }
+
+  return folder;
+};
+
+const findOwnedFile = async (fileId, userId) => {
+  const file = await File.findById(fileId);
+  if (!file) {
+    throw new NotFoundError('File not found.');
+  }
+
+  if (file.user_id.toString() !== userId.toString()) {
+    throw new ForbiddenError('Access denied: you do not own this file.');
+  }
+
+  return file;
+};
+
 const uploadFileController = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const { folder_id } = req.body;
 
+    // Debug logging to verify Multer file handling
+    console.log('--- UploadFileController Debug ---');
+    console.log('req.file:', req.file);
+    console.log('req.body:', req.body);
+
     if (!req.file) {
-      return next(new BadRequestError('No file buffer uploaded.'));
+      return next(new BadRequestError('No file uploaded.'));
     }
 
-    let dbFolderId = null;
-    if (folder_id && folder_id !== 'null' && folder_id !== '') {
-      dbFolderId = parseInt(folder_id, 10);
-      
-      // Ownership check for destination folder
-      const [folder] = await pool.query('SELECT user_id FROM Folders WHERE id = ?', [dbFolderId]);
-      if (folder.length === 0) {
-        return next(new NotFoundError('Destination folder not found.'));
-      }
-      if (folder[0].user_id !== userId) {
-        return next(new ForbiddenError('Access Denied: You do not own the destination folder.'));
-      }
-    }
-
+    const folder = await ensureOwnedFolder(folder_id, userId);
     const file = req.file;
-    const fileId = crypto.randomUUID();
     const category = getS3Category(file.mimetype);
+    const objectId = crypto.randomUUID();
+    const sanitizedName = file.originalname.replace(/\s+/g, '-');
+    const s3Key = `users/${userId}/${category}/${objectId}-${sanitizedName}`;
 
-    // Prefix path matching S3 bucket folder requirement
-    const s3Key = `users/${userId}/${category}/${fileId}-${file.originalname}`;
+    // S3 upload debugging
+    console.log('Uploading to S3...');
+    console.log('Bucket:', process.env.AWS_S3_BUCKET_NAME);
+    console.log('Region:', process.env.AWS_REGION);
+    console.log('Filename:', file?.originalname);
+    console.log('Size:', file?.size);
 
-    // Upload to Amazon S3
-    await uploadFile(file.buffer, s3Key, file.mimetype);
+    let uploadResult;
+    try {
+      uploadResult = await uploadFile(file.buffer, s3Key, file.mimetype);
+      console.log('S3 Upload Success:', uploadResult);
+    } catch (s3Err) {
+      console.error('S3 Upload Error:', s3Err);
+      throw s3Err;
+    }
 
-    // Write metadata to RDS
-    const insertQuery = `
-      INSERT INTO Files (id, user_id, folder_id, file_name, original_name, file_type, file_size, s3_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `;
-    await pool.query(insertQuery, [
-      fileId,
-      userId,
-      dbFolderId,
-      file.originalname,
-      file.originalname,
-      file.mimetype,
-      file.size,
-      s3Key
-    ]);
+    const createdFile = await File.create({
+      user_id: userId,
+      folder_id: folder ? folder.id : null,
+      file_name: file.originalname,
+      original_name: file.originalname,
+      file_type: file.mimetype,
+      file_size: file.size,
+      s3_key: s3Key
+    });
 
-    // Record activity
-    await logActivity(userId, 'Upload', { fileId, fileName: file.originalname }, req.ip);
+    await logActivity(userId, 'Upload', { fileId: createdFile.id, fileName: createdFile.file_name }, req.ip);
 
     res.status(201).json({
       status: 'success',
       data: {
-        file: {
-          id: fileId,
-          user_id: userId,
-          folder_id: dbFolderId,
-          file_name: file.originalname,
-          file_type: file.mimetype,
-          file_size: file.size,
-          s3_key: s3Key,
-          is_favorite: 0
-        }
+        file: serializeFile(createdFile)
       }
     });
   } catch (error) {
@@ -87,39 +117,27 @@ const uploadFileController = async (req, res, next) => {
   }
 };
 
-/**
- * Get files list
- * Supports optional parent folder_id and is_favorite filtering
- */
 const getFiles = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const { folder_id, is_favorite } = req.query;
-
-    let query = 'SELECT * FROM Files WHERE user_id = ? AND is_deleted = 0';
-    let params = [userId];
+    const query = { user_id: userId };
 
     if (folder_id !== undefined) {
-      if (folder_id === 'null' || folder_id === '') {
-        query += ' AND folder_id IS NULL';
-      } else {
-        query += ' AND folder_id = ?';
-        params.push(folder_id);
-      }
+      query.folder_id = folder_id === 'null' || folder_id === '' ? null : folder_id;
     }
 
     if (is_favorite !== undefined) {
-      query += ' AND is_favorite = ?';
-      params.push(is_favorite === 'true' ? 1 : 0);
+      query.is_favorite = is_favorite === 'true';
     }
 
-    const [files] = await pool.query(query, params);
+    const files = await File.find(query).sort({ created_at: -1 });
 
     res.status(200).json({
       status: 'success',
       results: files.length,
       data: {
-        files
+        files: files.map(serializeFile)
       }
     });
   } catch (error) {
@@ -127,28 +145,14 @@ const getFiles = async (req, res, next) => {
   }
 };
 
-/**
- * Get a single file metadata by ID
- */
 const getFile = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
-
-    const [files] = await pool.query('SELECT * FROM Files WHERE id = ? AND is_deleted = 0', [id]);
-    if (files.length === 0) {
-      return next(new NotFoundError('File not found.'));
-    }
-
-    const file = files[0];
-    if (file.user_id !== userId) {
-      return next(new ForbiddenError('Access Denied: You do not own this file.'));
-    }
+    const file = await findOwnedFile(req.params.id, req.user.id);
 
     res.status(200).json({
       status: 'success',
       data: {
-        file
+        file: serializeFile(file)
       }
     });
   } catch (error) {
@@ -156,38 +160,20 @@ const getFile = async (req, res, next) => {
   }
 };
 
-/**
- * Rename file name
- */
 const updateFile = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const { file_name } = req.body;
-    const userId = req.user.id;
+    const file = await findOwnedFile(req.params.id, req.user.id);
+    const oldName = file.file_name;
 
-    // Ownership check
-    const [files] = await pool.query('SELECT user_id, file_name FROM Files WHERE id = ? AND is_deleted = 0', [id]);
-    if (files.length === 0) {
-      return next(new NotFoundError('File not found.'));
-    }
+    file.file_name = req.body.file_name;
+    await file.save();
 
-    const file = files[0];
-    if (file.user_id !== userId) {
-      return next(new ForbiddenError('Access Denied: You do not own this file.'));
-    }
-
-    await pool.query('UPDATE Files SET file_name = ? WHERE id = ?', [file_name, id]);
-
-    // Log rename activity
-    await logActivity(userId, 'Rename', { fileId: id, oldName: file.file_name, newName: file_name }, req.ip);
+    await logActivity(req.user.id, 'Rename', { fileId: file.id, oldName, newName: file.file_name }, req.ip);
 
     res.status(200).json({
       status: 'success',
       data: {
-        file: {
-          id,
-          file_name
-        }
+        file: serializeFile(file)
       }
     });
   } catch (error) {
@@ -195,142 +181,78 @@ const updateFile = async (req, res, next) => {
   }
 };
 
-/**
- * Soft delete file
- */
 const deleteFileController = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
+    const file = await findOwnedFile(req.params.id, req.user.id);
 
-    // Verify owner
-    const [files] = await pool.query('SELECT user_id, file_name FROM Files WHERE id = ? AND is_deleted = 0', [id]);
-    if (files.length === 0) {
-      return next(new NotFoundError('File not found.'));
-    }
+    await deleteS3File(file.s3_key);
+    await SharedLink.deleteMany({ file_id: file.id });
+    await File.findByIdAndDelete(file.id);
 
-    const file = files[0];
-    if (file.user_id !== userId) {
-      return next(new ForbiddenError('Access Denied: You do not own this file.'));
-    }
-
-    // Perform soft-delete
-    await pool.query('UPDATE Files SET is_deleted = 1 WHERE id = ?', [id]);
-
-    // Log deletion activity
-    await logActivity(userId, 'Delete', { fileId: id, fileName: file.file_name, type: 'soft' }, req.ip);
+    await logActivity(req.user.id, 'Delete', { fileId: file.id, fileName: file.file_name }, req.ip);
 
     res.status(200).json({
       status: 'success',
-      message: 'File soft deleted successfully.'
+      message: 'File metadata deleted successfully.'
     });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * Move file to another directory folder
- */
 const moveFile = async (req, res, next) => {
   try {
     const { file_id, folder_id } = req.body;
-    const userId = req.user.id;
+    const file = await findOwnedFile(file_id, req.user.id);
+    const folder = await ensureOwnedFolder(folder_id, req.user.id);
+    const oldFolder = file.folder_id ? file.folder_id.toString() : null;
 
-    // Fetch file ownership
-    const [files] = await pool.query('SELECT user_id, folder_id, file_name FROM Files WHERE id = ? AND is_deleted = 0', [file_id]);
-    if (files.length === 0) {
-      return next(new NotFoundError('File not found.'));
-    }
+    file.folder_id = folder ? folder.id : null;
+    await file.save();
 
-    const file = files[0];
-    if (file.user_id !== userId) {
-      return next(new ForbiddenError('Access Denied: You do not own this file.'));
-    }
-
-    // Verify target folder ownership
-    let dbFolderId = null;
-    if (folder_id !== null && folder_id !== '') {
-      dbFolderId = parseInt(folder_id, 10);
-      const [folder] = await pool.query('SELECT user_id FROM Folders WHERE id = ?', [dbFolderId]);
-      if (folder.length === 0) {
-        return next(new NotFoundError('Target folder not found.'));
-      }
-      if (folder[0].user_id !== userId) {
-        return next(new ForbiddenError('Access Denied: You do not own the target folder.'));
-      }
-    }
-
-    await pool.query('UPDATE Files SET folder_id = ? WHERE id = ?', [dbFolderId, file_id]);
-
-    // Log move as rename event in activities schema
     await logActivity(
-      userId,
-      'Rename',
-      { fileId: file_id, fileName: file.file_name, subaction: 'moved', oldFolder: file.folder_id, newFolder: dbFolderId },
+      req.user.id,
+      'Move',
+      { fileId: file.id, fileName: file.file_name, oldFolder, newFolder: file.folder_id ? file.folder_id.toString() : null },
       req.ip
     );
 
     res.status(200).json({
       status: 'success',
-      message: 'File moved successfully.'
+      data: {
+        file: serializeFile(file)
+      }
     });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * Toggle favorite status of a file
- */
 const favoriteFile = async (req, res, next) => {
   try {
     const { file_id, is_favorite } = req.body;
-    const userId = req.user.id;
+    const file = await findOwnedFile(file_id, req.user.id);
 
-    const [files] = await pool.query('SELECT user_id FROM Files WHERE id = ? AND is_deleted = 0', [file_id]);
-    if (files.length === 0) {
-      return next(new NotFoundError('File not found.'));
-    }
-
-    if (files[0].user_id !== userId) {
-      return next(new ForbiddenError('Access Denied: You do not own this file.'));
-    }
-
-    await pool.query('UPDATE Files SET is_favorite = ? WHERE id = ?', [is_favorite ? 1 : 0, file_id]);
+    file.is_favorite = is_favorite;
+    await file.save();
 
     res.status(200).json({
       status: 'success',
-      message: is_favorite ? 'File marked as favorite.' : 'File removed from favorites.'
+      data: {
+        file: serializeFile(file)
+      }
     });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * Get S3 Pre-Signed URL for authenticated user download
- */
 const downloadFile = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
-
-    const [files] = await pool.query('SELECT * FROM Files WHERE id = ? AND is_deleted = 0', [id]);
-    if (files.length === 0) {
-      return next(new NotFoundError('File not found.'));
-    }
-
-    const file = files[0];
-    if (file.user_id !== userId) {
-      return next(new ForbiddenError('Access Denied: You do not own this file.'));
-    }
-
-    // Generate pre-signed URL valid for 15 minutes
+    const file = await findOwnedFile(req.params.id, req.user.id);
     const presignedUrl = await getPreSignedDownloadUrl(file.s3_key, file.original_name, 900);
 
-    // Audit Download Action
-    await logActivity(userId, 'Download', { fileId: id, fileName: file.file_name }, req.ip);
+    await logActivity(req.user.id, 'Download', { fileId: file.id, fileName: file.file_name }, req.ip);
 
     res.status(200).json({
       status: 'success',
@@ -341,45 +263,36 @@ const downloadFile = async (req, res, next) => {
   }
 };
 
-/**
- * Create public read-only shared link
- */
 const shareFile = async (req, res, next) => {
   try {
     const { file_id, permission, expiry_hours } = req.body;
-    const userId = req.user.id;
-
-    const [files] = await pool.query('SELECT user_id, file_name FROM Files WHERE id = ? AND is_deleted = 0', [file_id]);
-    if (files.length === 0) {
-      return next(new NotFoundError('File not found.'));
-    }
-
-    if (files[0].user_id !== userId) {
-      return next(new ForbiddenError('Access Denied: You do not own this file.'));
-    }
-
+    const file = await findOwnedFile(file_id, req.user.id);
     const token = crypto.randomBytes(32).toString('hex');
-    const expiryDate = new Date(Date.now() + expiry_hours * 60 * 60 * 1000);
-    const shareId = crypto.randomUUID();
+    const expiryDate = expiry_hours ? new Date(Date.now() + expiry_hours * 60 * 60 * 1000) : null;
 
-    const insertQuery = `
-      INSERT INTO SharedLinks (id, file_id, token, permission, expiry_date)
-      VALUES (?, ?, ?, ?, ?)
-    `;
-    await pool.query(insertQuery, [shareId, file_id, token, permission || 'read', expiryDate]);
+    const sharedLink = await SharedLink.create({
+      file_id: file.id,
+      token,
+      permission: permission || 'read',
+      expiry_date: expiryDate
+    });
 
-    // Log Share
-    await logActivity(userId, 'Share', { fileId: file_id, fileName: files[0].file_name, shareId, expiryHours: expiry_hours }, req.ip);
+    await logActivity(
+      req.user.id,
+      'Share',
+      { fileId: file.id, fileName: file.file_name, shareId: sharedLink.id, expiryHours: expiry_hours || null },
+      req.ip
+    );
 
     res.status(201).json({
       status: 'success',
       data: {
-        id: shareId,
-        file_id,
-        token,
-        permission: permission || 'read',
-        expiry_date: expiryDate.toISOString(),
-        share_link: `${req.protocol}://${req.get('host')}/api/files/share/${token}`
+        id: sharedLink.id,
+        file_id: file.id,
+        token: sharedLink.token,
+        permission: sharedLink.permission,
+        expiry_date: sharedLink.expiry_date,
+        share_link: `${req.protocol}://${req.get('host')}/api/share/${sharedLink.token}`
       }
     });
   } catch (error) {
@@ -387,44 +300,29 @@ const shareFile = async (req, res, next) => {
   }
 };
 
-/**
- * Fetch shared file metadata and download link (Public endpoint - no JWT required)
- */
 const getSharedFile = async (req, res, next) => {
   try {
-    const { token } = req.params;
+    const sharedLink = await SharedLink.findOne({ token: req.params.token }).populate('file_id');
 
-    const query = `
-      SELECT sl.id AS share_id, sl.expiry_date, f.id AS file_id, f.file_name, f.original_name, f.file_type, f.file_size, f.s3_key, f.user_id
-      FROM SharedLinks sl
-      INNER JOIN Files f ON sl.file_id = f.id
-      WHERE sl.token = ? AND f.is_deleted = 0
-    `;
-    const [results] = await pool.query(query, [token]);
-
-    if (results.length === 0) {
-      return next(new NotFoundError('Shared link invalid or the target file was deleted.'));
+    if (!sharedLink || !sharedLink.file_id) {
+      return next(new NotFoundError('Shared link not found.'));
     }
 
-    const share = results[0];
-
-    // Check share link expiration
-    if (new Date() > new Date(share.expiry_date)) {
+    if (sharedLink.expiry_date && new Date() > sharedLink.expiry_date) {
       return next(new ForbiddenError('This shared link has expired.'));
     }
 
-    // Generate S3 Pre-signed URL for the anonymous client
-    const presignedUrl = await getPreSignedDownloadUrl(share.s3_key, share.original_name, 600);
+    const file = sharedLink.file_id;
+    const presignedUrl = await getPreSignedDownloadUrl(file.s3_key, file.original_name, 600);
 
-    // Audit Download via public share token (attributed to file owner's logs ledger)
-    await logActivity(share.user_id, 'Download', { fileId: share.file_id, viaShare: share.share_id, status: 'public' }, req.ip);
+    await logActivity(file.user_id, 'Download', { fileId: file.id, viaShare: sharedLink.id, status: 'public' }, req.ip);
 
     res.status(200).json({
       status: 'success',
       data: {
-        file_name: share.file_name,
-        file_type: share.file_type,
-        file_size: share.file_size,
+        file_name: file.file_name,
+        file_type: file.file_type,
+        file_size: file.file_size,
         download_url: presignedUrl
       }
     });
@@ -433,32 +331,19 @@ const getSharedFile = async (req, res, next) => {
   }
 };
 
-/**
- * Revoke/delete shared link
- */
 const deleteShare = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
+    const sharedLink = await SharedLink.findById(req.params.id).populate('file_id');
 
-    // Verify ownership
-    const checkQuery = `
-      SELECT sl.id, f.user_id 
-      FROM SharedLinks sl
-      INNER JOIN Files f ON sl.file_id = f.id
-      WHERE sl.id = ?
-    `;
-    const [shares] = await pool.query(checkQuery, [id]);
-
-    if (shares.length === 0) {
+    if (!sharedLink || !sharedLink.file_id) {
       return next(new NotFoundError('Shared link not found.'));
     }
 
-    if (shares[0].user_id !== userId) {
-      return next(new ForbiddenError('Access Denied: You do not own the file associated with this share link.'));
+    if (sharedLink.file_id.user_id.toString() !== req.user.id.toString()) {
+      return next(new ForbiddenError('Access denied: you do not own the file associated with this share link.'));
     }
 
-    await pool.query('DELETE FROM SharedLinks WHERE id = ?', [id]);
+    await SharedLink.findByIdAndDelete(sharedLink.id);
 
     res.status(200).json({
       status: 'success',
